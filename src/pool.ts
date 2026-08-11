@@ -37,7 +37,14 @@ function opcoes(banco: Banco): Firebird.Options {
     password: senhaPorVersao(banco.versao),
     lowercase_keys: false,
     pageSize: 4096,
+    // `charset` é o alfabeto em que o driver DECODIFICA strings do lado JS.
+    // `encoding` é o que vira o lc_ctype DA CONEXÃO (connection.js usa
+    // `options.encoding || 'UTF8'`). Sem ele, a conexão caía em UTF8 e as bases
+    // charset NONE (bytes WIN1252) estouravam "Malformed string" no 1º acento
+    // fora de OCTETS — sobretudo no Firebird 3, que valida o charset. Fixar os
+    // dois em NONE é o correto: NONE = sem transliteração, bytes crus.
     charset: banco.charset ?? 'NONE',
+    encoding: banco.charset ?? 'NONE',
     blobAsText: banco.blobComoTexto ?? true,
   } as Firebird.Options;
 }

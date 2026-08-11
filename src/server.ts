@@ -187,3 +187,17 @@ function encerrar() {
 }
 process.on('SIGINT', encerrar);
 process.on('SIGTERM', encerrar);
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Rede de segurança: o agente atende VÁRIOS sistemas ao mesmo tempo. Uma exceção
+// não tratada — ex.: o driver node-firebird estourando ao falar com uma versão de
+// Firebird para a qual o patch não foi feito — NÃO pode derrubar o processo e
+// tirar todos os municípios do ar. Aqui a gente loga e segue vivo; a requisição
+// que causou já terá falhado (ou expira pelo timeout da consulta).
+// ──────────────────────────────────────────────────────────────────────────────
+process.on('uncaughtException', (erro) => {
+  console.error('[uncaughtException] agente mantido no ar:', erro instanceof Error ? erro.message : erro);
+});
+process.on('unhandledRejection', (motivo) => {
+  console.error('[unhandledRejection] agente mantido no ar:', motivo instanceof Error ? motivo.message : motivo);
+});

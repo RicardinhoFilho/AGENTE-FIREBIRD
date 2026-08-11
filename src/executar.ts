@@ -72,50 +72,83 @@ export interface Resultado {
   ms: number;
 }
 
-export async function executar(
-  banco: Banco,
+// Tempo máximo para ADQUIRIR a conexão (handshake). Curto de propósito: um
+// Firebird remoto morto/inalcançável não pode pendurar a requisição por minutos.
+const TIMEOUT_CONEXAO = 20000;
+
+interface ErroConexao extends Error { __faseConexao?: boolean; }
+
+/**
+ * Erro TRANSITÓRIO de conexão/handshake — típico de Firebird REMOTO (Linux),
+ * quando o pacote do handshake chega fragmentado e o driver lê um objeto
+ * incompleto ("Cannot read properties of undefined (reading 'protocolMinimumType')"),
+ * ou o socket cai. Acontece ANTES de qualquer SQL, então retentar (conexão nova)
+ * é seguro e costuma resolver — mesma rede de segurança que a conexão direta das
+ * APIs (ARRECADACAO/CAD ÚNICO/RELATORIO) já tem.
+ */
+function ehTransitorioDeConexao(e: unknown): boolean {
+  if (!(e as ErroConexao)?.__faseConexao) return false;
+  const msg = String((e as Error)?.message ?? e);
+  return /protocolMinimumType|Cannot read propert|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|socket hang up|read ECONNRESET|connection/i
+    .test(msg);
+}
+
+/** Uma tentativa: adquire a conexão (com timeout), roda a query, devolve o resultado. */
+function executarUmaVez(
+  pool: Firebird.ConnectionPool,
   consulta: Consulta,
-  codificacao: Codificacao = 'win1252'
+  codificacao: Codificacao,
+  inicio: number
 ): Promise<Resultado> {
-  const pool = await obterPool(banco);
-  const inicio = Date.now();
-
   return new Promise<Resultado>((resolve, reject) => {
-    pool.get((erroConexao: Error | null, db: Firebird.Database) => {
-      if (erroConexao) return reject(traduzir(erroConexao, banco));
+    let terminou = false;
+    let db: Firebird.Database | null = null;
 
-      let terminou = false;
-      // Devolve a conexão ao pool. Sem isto, cada consulta que estoura o tempo
-      // vaza uma conexão e o pool esgota — depois de 5, tudo trava.
-      const soltar = () => {
-        try {
-          db.detach();
-        } catch {
-          /* ignore */
-        }
-      };
-      const encerrar = (erro: Error | null, r?: Resultado) => {
-        if (terminou) return;
-        terminou = true;
-        clearTimeout(cronometro);
-        soltar();
-        if (erro) reject(erro);
-        else resolve(r!);
-      };
+    // Devolve a conexão ao pool. Sem isto, cada consulta que estoura o tempo
+    // vaza uma conexão e o pool esgota — depois de 5, tudo trava.
+    const soltar = () => {
+      const c = db;
+      db = null;
+      if (c) { try { c.detach(); } catch { /* ignore */ } }
+    };
+    const encerrar = (erro: Error | null, r?: Resultado) => {
+      if (terminou) return;
+      terminou = true;
+      clearTimeout(timer);
+      soltar();
+      if (erro) reject(erro);
+      else resolve(r!);
+    };
 
-      const cronometro = setTimeout(
-        () =>
-          encerrar(
-            new Error(`A consulta passou de ${config.timeoutMs}ms e foi interrompida.`)
-          ),
+    // 1) Timeout da AQUISIÇÃO da conexão. Se o handshake pendurar (conexão morta),
+    //    o request não fica preso: expira, marca fase de conexão e o wrapper retenta.
+    let timer = setTimeout(() => {
+      const e: ErroConexao = new Error('Tempo limite ao abrir conexão com o Firebird (handshake).');
+      e.__faseConexao = true;
+      encerrar(e);
+    }, TIMEOUT_CONEXAO);
+
+    pool.get((erroConexao: Error | null, conexao: Firebird.Database) => {
+      if (erroConexao) {
+        // Falha ao ADQUIRIR a conexão — nenhum SQL rodou, seguro retentar.
+        (erroConexao as ErroConexao).__faseConexao = true;
+        return encerrar(erroConexao);
+      }
+      if (terminou) { try { conexao.detach(); } catch { /* ignore */ } return; }
+      db = conexao;
+
+      // 2) Conexão de pé: troca para o timeout da QUERY.
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => encerrar(new Error(`A consulta passou de ${config.timeoutMs}ms e foi interrompida.`)),
         config.timeoutMs
       );
 
-      db.query(
+      conexao.query(
         consulta.sql,
         prepararParametros(consulta.parametros ?? []) as never[],
         (erro: Error | null, resultado: unknown) => {
-          if (erro) return encerrar(erro);
+          if (erro) return encerrar(erro);   // erro de SQL — NÃO retenta
 
           const brutas = Array.isArray(resultado)
             ? (resultado as Record<string, unknown>[])
@@ -138,6 +171,35 @@ export async function executar(
       );
     });
   });
+}
+
+export async function executar(
+  banco: Banco,
+  consulta: Consulta,
+  codificacao: Codificacao = 'win1252'
+): Promise<Resultado> {
+  const inicio = Date.now();
+  const MAX_TENTATIVAS = 3;
+  let ultimoErro: unknown;
+
+  for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+    try {
+      const pool = await obterPool(banco);
+      return await executarUmaVez(pool, consulta, codificacao, inicio);
+    } catch (e) {
+      ultimoErro = e;
+      // Só falhas de CONEXÃO transitórias são retentadas (não duplica escrita).
+      if (!ehTransitorioDeConexao(e) || tentativa === MAX_TENTATIVAS) {
+        // Erro de conexão vira mensagem amigável; erro de SQL passa como veio.
+        throw (e as ErroConexao)?.__faseConexao ? traduzir(e as Error, banco) : e;
+      }
+      console.warn(
+        `[agente] conexão falhou (tentativa ${tentativa}/${MAX_TENTATIVAS}), retentando: ${String((e as Error)?.message ?? e)}`
+      );
+      await new Promise(r => setTimeout(r, 200 * tentativa));
+    }
+  }
+  throw ultimoErro;
 }
 
 /**
