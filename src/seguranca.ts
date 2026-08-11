@@ -84,19 +84,21 @@ export function validarSql(sql: string): string | null {
   }
 
   /**
-   * DDL é recusada **sempre**, mesmo com escrita ligada.
+   * DDL (CREATE/ALTER/DROP/TRUNCATE/...) só passa com PERMITIR_DDL ligado.
    *
-   * Nenhum sistema da casa cria ou destrói tabela em tempo de execução — isso é
-   * trabalho de migração, feito à mão. E é justamente o comando que transforma
-   * um vazamento de chave numa base perdida: um `DROP TABLE PARCELAS` não tem
-   * desfazer.
+   * Fica atrás de um flag próprio, separado do PERMITIR_ESCRITA, porque é mais
+   * perigoso: um `DROP TABLE PARCELAS` não tem desfazer. Ligado, serve às
+   * migrações; a lista de IPs e a chave é que seguram o acesso.
    */
   if (/^\s*(drop|alter|create|recreate|truncate|grant|revoke)\b/i.test(limpo)) {
-    const primeira = limpo.split(/\s+/)[0]?.toUpperCase() ?? '?';
-    return (
-      `O agente nunca executa "${primeira}" — comandos que mudam a estrutura do banco ` +
-      'não passam por aqui, com ou sem PERMITIR_ESCRITA.'
-    );
+    if (!config.permitirDdl) {
+      const primeira = limpo.split(/\s+/)[0]?.toUpperCase() ?? '?';
+      return (
+        `DDL desligado: o agente recusou "${primeira}". ` +
+        'Ligue PERMITIR_DDL para permitir mudanças de estrutura (CREATE/ALTER/DROP/...).'
+      );
+    }
+    return null; // DDL liberado (migrações)
   }
 
   if (config.permitirEscrita) return null;

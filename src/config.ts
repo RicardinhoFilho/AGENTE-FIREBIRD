@@ -40,6 +40,7 @@ const IPS_FIXOS: string[] = [
 const CHAVE_FIXA = 'b8798b02d50256251d8b9a9ce4e149d62cd8513efa38479c4ffc64c7ff8a2c33';
 const PORTA_PADRAO = 3060;
 const PERMITIR_ESCRITA_PADRAO = true;   // troque para false se os sistemas so leem
+const PERMITIR_DDL_PADRAO = true;       // CREATE/ALTER/DROP... (migracoes). false = mais seguro
 
 /** Mostrado no log, para quem instala saber qual arquivo o agente leu. */
 export const caminhoDoEnv = path.join(pastaDoEnv, '.env');
@@ -82,6 +83,13 @@ export const config = {
    */
   permitirEscrita: booleano('PERMITIR_ESCRITA', PERMITIR_ESCRITA_PADRAO),
 
+  /**
+   * Deixa passar comandos de ESTRUTURA (DDL): CREATE/ALTER/DROP/TRUNCATE/...
+   * Necessario para migracoes. Fica separado do PERMITIR_ESCRITA porque e mais
+   * perigoso — um DROP nao tem desfazer. A lista de IPs + a chave e que seguram.
+   */
+  permitirDdl: booleano('PERMITIR_DDL', PERMITIR_DDL_PADRAO),
+
   /** Corta a consulta que passar disto. Protege memória e o link da prefeitura. */
   maxLinhas: Number(process.env.MAX_LINHAS ?? 200000),
 
@@ -120,6 +128,12 @@ export function avisos(): string[] {
     lista.push(
       'PERMITIR_ESCRITA=true — o agente aceita INSERT/UPDATE/DELETE. ' +
         'Só deixe assim se algum sistema realmente precisa gravar.'
+    );
+  }
+  if (config.permitirDdl) {
+    lista.push(
+      'PERMITIR_DDL=true — o agente aceita CREATE/ALTER/DROP/TRUNCATE (mudam a ' +
+        'estrutura do banco). Use para migracoes; um DROP nao tem desfazer.'
     );
   }
   if (config.ipsPermitidos.length === 0) {
