@@ -1,0 +1,76 @@
+import Firebird from 'node-firebird';
+import { config } from './config';
+import type { Banco } from './tipos';
+
+/**
+ * Um pool por banco.
+ *
+ * O agente atende vários sistemas e, às vezes, mais de um exercício
+ * (`SIAFIC2026`, `SIAFIC2027`) do mesmo servidor. Abrir conexão a cada consulta
+ * seria caro; guardar um pool por destino resolve.
+ *
+ * Guarda-se a **Promise**: duas requisições simultâneas para o mesmo banco
+ * compartilham a abertura em vez de criarem dois pools.
+ */
+const pools = new Map<string, Promise<Firebird.ConnectionPool>>();
+
+/**
+ * A senha do SYSDBA, deduzida da versão do Firebird — mesma regra dos outros
+ * sistemas da casa. A coluna `versao` vem escrita de jeitos diferentes ("3.0",
+ * "3", "1.5"), então o que vale é o número maior dela, não o texto.
+ */
+export function senhaPorVersao(versao: string | number | undefined): string {
+  const maior = Number(String(versao ?? '').match(/(\d+)/)?.[1]);
+  return maior >= 3 ? config.senhaV3 : config.senhaV15;
+}
+
+function chaveDo(banco: Banco): string {
+  return `${banco.host}:${banco.porta ?? 3050}:${banco.caminho}`;
+}
+
+function opcoes(banco: Banco): Firebird.Options {
+  return {
+    host: banco.host,
+    port: Number(banco.porta) || 3050,
+    database: banco.caminho,
+    user: 'SYSDBA',
+    password: senhaPorVersao(banco.versao),
+    lowercase_keys: false,
+    pageSize: 4096,
+    charset: banco.charset ?? 'NONE',
+    blobAsText: banco.blobComoTexto ?? true,
+  } as Firebird.Options;
+}
+
+export function obterPool(banco: Banco): Promise<Firebird.ConnectionPool> {
+  const chave = chaveDo(banco);
+  const existente = pools.get(chave);
+  if (existente) return existente;
+
+  const promessa = Promise.resolve(Firebird.pool(config.tamanhoPool, opcoes(banco)));
+  // Falhou ao abrir? Sai do cache, para a próxima requisição tentar de novo em
+  // vez de repetir o mesmo erro para sempre.
+  promessa.catch(() => pools.delete(chave));
+  pools.set(chave, promessa);
+
+  console.log(`[pool] aberto para ${chave} (Firebird ${banco.versao ?? '?'})`);
+  return promessa;
+}
+
+/** Fecha tudo — usado no encerramento do processo. */
+export function fecharTudo(): void {
+  for (const promessa of pools.values()) {
+    promessa
+      .then(p => {
+        try {
+          p.destroy();
+        } catch {
+          /* nada a fazer */
+        }
+      })
+      .catch(() => {
+        /* pool que nem chegou a abrir */
+      });
+  }
+  pools.clear();
+}

@@ -1,0 +1,92 @@
+diff --git a/node_modules/node-firebird/lib/wire/connection.js b/node_modules/node-firebird/lib/wire/connection.js
+index 5f1cec2..0a379a0 100644
+--- a/node_modules/node-firebird/lib/wire/connection.js
++++ b/node_modules/node-firebird/lib/wire/connection.js
+@@ -489,9 +489,26 @@ function decodeResponse(data, callback, cnx, lowercase_keys, cb) {
+                 return cb(new Error('Unexpected:' + r));
+         }
+     } catch (err) {
++        // RangeError = pacote ainda incompleto: aguarda mais dados (comportamento original).
+         if (err instanceof RangeError) {
+             return cb(err);
+         }
++        // PATCH (Sinsoft): erro REAL ao decodificar a resposta do Firebird.
++        //  - Re-lançar aqui derrubava TODO o processo da API (crash + ECONNRESET),
++        //    pois isto roda dentro do handler de 'data' do socket.
++        //  - Tratar como pacote incompleto (return cb(err)) travava a query em
++        //    "loading eterno", esperando dados que nunca chegam.
++        // Solução: entregar o erro ao callback da query, removê-la da fila e
++        // consumir o buffer — a API responde 500 com mensagem e segue viva.
++        console.error('[node-firebird][patch] erro ao decodificar resposta:', err && err.message);
++        if (typeof callback === 'function') {
++            try {
++                cnx._queue.shift();
++                cnx._pending.shift();
++            } catch (_) { /* ignore */ }
++            data.pos = data.buffer.length; // evita reprocessar o mesmo buffer em loop
++            return callback(err);
++        }
+         throw err;
+     }
+ }
+@@ -508,7 +525,19 @@ function parseOpResponse(data, response, cb) {
+         response.oid = oid;
+     }
+ 
+-    var buf = data.readArray();
++    // FB 1.5 (protocolo 10): o tamanho do buffer de info (ex.: describe do prepare) vem
++    // como -1 (0xffffffff). O tamanho REAL é o buffer_length pedido pelo node-firebird
++    // (65535). Lemos esse tamanho (a info é auto-delimitada; o resto é padding) e seguimos
++    // normalmente p/ o status vector. Pacotes parciais são remontados pelo mecanismo normal.
++    var _dlen = data.readInt();
++    if (_dlen < 0) _dlen = 65535;
++    var _aligned = (_dlen + 3) & ~3;   // dados alinhados a 4 bytes
++    // Se o buffer de dados ainda não chegou inteiro, remonta o pacote (mecanismo padrão).
++    if (_dlen && data.pos + _aligned > data.buffer.length) {
++        return cb ? cb(new Error('Packet is not complete')) : undefined;
++    }
++    var buf = _dlen ? data.buffer.slice(data.pos, data.pos + _dlen) : null;
++    data.pos += _aligned;
+     if (buf) {
+         response.buffer = buf;
+     }
+@@ -562,7 +591,7 @@ function parseOpResponse(data, response, cb) {
+                 break;
+             default:
+                 if (cb) {
+-                    cb(new Error('Unexpected: ' + op))
++                    return cb(new Error('Unexpected: ' + op));
+                 } else {
+                     throw new Error('Unexpected: ' + op);
+                 }
+@@ -1123,8 +1152,17 @@ function describe(buff, statement) {
+     var parameters = null;
+     var type, param;
+ 
++    // Reset: evita vazar o descritor de entrada/saída de uma query anterior quando o
++    // statement é reusado (pool). No FB 1.5 a info de describe pode não trazer a seção
++    // de bind/select de novo, então garantimos arrays vazios como base.
++    statement.input = [];
++    statement.output = [];
++
+     while (br.pos < br.buffer.length) {
+         switch (br.readByteCode()) {
++            case Const.isc_info_end:
++                br.pos = br.buffer.length;   // fim real da info — ignora padding/lixo do buffer reusado
++                break;
+             case Const.isc_info_sql_stmt_type:
+                 statement.type = br.readInt();
+                 break;
+diff --git a/node_modules/node-firebird/lib/wire/const.js b/node_modules/node-firebird/lib/wire/const.js
+index 78bfdf0..80bf136 100644
+--- a/node_modules/node-firebird/lib/wire/const.js
++++ b/node_modules/node-firebird/lib/wire/const.js
+@@ -12,7 +12,7 @@ const defaultOptions = {
+     DEFAULT_LOWERCASE_KEYS : false,
+     DEFAULT_PAGE_SIZE : 4096,
+     DEFAULT_SVC_NAME : 'service_mgr',
+-    DEFAULT_ENCODING : 'UTF8',
++    DEFAULT_ENCODING : 'binary',
+     DEFAULT_FETCHSIZE : 200,
+ };
+ 
