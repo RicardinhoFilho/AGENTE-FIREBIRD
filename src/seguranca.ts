@@ -25,7 +25,14 @@ export function filtrarIp(req: Request, res: Response, next: NextFunction): void
   if (config.ipsPermitidos.length > 0) {
     const origem = (req.ip ?? '').replace(/^::ffff:/, '');
     if (!config.ipsPermitidos.includes(origem)) {
-      console.warn(`[bloqueado] IP ${origem} não está em IPS_PERMITIDOS`);
+      // A cadeia inteira vai junto: quando o nginx da prefeitura esquece o
+      // `proxy_set_header X-Forwarded-For`, o agente só enxerga 127.0.0.1 e o
+      // log sem isso não dizia se o problema era a lista ou o proxy.
+      const cadeia = req.headers['x-forwarded-for'] ?? '(sem X-Forwarded-For)';
+      console.warn(
+        `[bloqueado] IP ${origem} não está em IPS_PERMITIDOS ` +
+          `| socket=${req.socket.remoteAddress} | X-Forwarded-For: ${cadeia}`
+      );
       res.status(403).json({ ok: false, erro: 'Origem não autorizada' });
       return;
     }

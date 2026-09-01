@@ -25,6 +25,10 @@ echo Copiando de "%ORIGEM%" para "%DESTINO%" ...
 if not exist "%DESTINO%" mkdir "%DESTINO%"
 robocopy "%ORIGEM%nginx" "%DESTINO%\nginx" /E /NFL /NDL /NJH /NJS /NP >nul
 robocopy "%ORIGEM%nssm"  "%DESTINO%\nssm"  /E /NFL /NDL /NJH /NJS /NP >nul
+REM gbak portatil (firebird\1.5 e firebird\3.0). Sem ele a rota /backup nao
+REM funciona onde o Firebird nao esta instalado NESTA maquina - que e a maioria,
+REM porque o banco costuma morar em outro servidor.
+robocopy "%ORIGEM%firebird" "%DESTINO%\firebird" /E /NFL /NDL /NJH /NJS /NP >nul
 copy /Y "%ORIGEM%agente-firebird.exe" "%DESTINO%\agente-firebird.exe" >nul
 
 REM --- localiza o nssm.exe (raiz ou win64) ---

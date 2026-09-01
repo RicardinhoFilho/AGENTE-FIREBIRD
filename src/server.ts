@@ -1,9 +1,21 @@
 import express, { Request, Response } from 'express';
+import {
+  backupEmAndamento,
+  iniciarBackup,
+  listarBackups,
+  obterBackup,
+} from './backup';
 import { avisos, caminhoDoEnv, config, erroDeConfiguracao } from './config';
 import { executar, executarEmTransacao } from './executar';
 import { fecharTudo } from './pool';
 import { autenticar, filtrarIp, validarSql } from './seguranca';
-import type { Banco, Codificacao, PedidoConsulta, PedidoLote } from './tipos';
+import type {
+  Banco,
+  Codificacao,
+  PedidoBackup,
+  PedidoConsulta,
+  PedidoLote,
+} from './tipos';
 
 /**
  * Agente Firebird da Sinsoft.
@@ -19,8 +31,19 @@ const app = express();
 // Os relatórios mandam consultas longas; o padrão de 100 kB do Express é pouco.
 app.use(express.json({ limit: '2mb' }));
 
-// Atrás de proxy/túnel o IP real vem no X-Forwarded-For.
-app.set('trust proxy', 1);
+/**
+ * Atrás de proxy/túnel o IP real vem no X-Forwarded-For.
+ *
+ * A lista (em vez de um número de saltos) faz o express andar pela cadeia de
+ * trás para frente **pulando todo endereço privado** e parar no primeiro
+ * público — funciona igual com o agente direto na porta, com um nginx na
+ * frente, ou com nginx + firewall/proxy da prefeitura somando um salto extra.
+ * Com `trust proxy: 1` esse último caso entregava o IP interno do proxy, e o
+ * filtro de IPS_PERMITIDOS recusava tudo, viesse de onde viesse.
+ *
+ * Só endereço privado é confiado, então ninguém de fora forja o header.
+ */
+app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal']);
 
 // Filtro de IP GLOBAL: nem /saude nem /health respondem a IP fora da lista.
 app.use(filtrarIp);
@@ -144,6 +167,56 @@ app.post('/lote', autenticar, async (req: Request, res: Response) => {
   const ms = Date.now() - inicio;
   console.log(`[lote] ${pedido.consultas.length} consultas em ${ms}ms`);
   return res.json({ ok: true, resultados, ms });
+});
+
+/**
+ * Backup da base para o FTP da Sinsoft.
+ *
+ * Responde **202 na hora**, com um `id`: o gbak de uma base de prefeitura passa
+ * de meia hora, e nenhuma requisicao HTTP atravessa isso. O andamento sai em
+ * `GET /backup/:id`.
+ *
+ * O destino nao vem no pedido, so o banco — o porque esta no `config.ts`.
+ */
+app.post('/backup', autenticar, (req: Request, res: Response) => {
+  if (!config.permitirBackup) {
+    return res.status(403).json({
+      ok: false,
+      erro: 'Backup desligado neste agente. Ligue PERMITIR_BACKUP no .env.',
+    });
+  }
+
+  const pedido = req.body as PedidoBackup;
+
+  const problemaBanco = conferirBanco(pedido?.banco);
+  if (problemaBanco) return res.status(400).json({ ok: false, erro: problemaBanco });
+
+  if (typeof pedido?.municipio !== 'string' || !pedido.municipio.trim()) {
+    return res.status(400).json({
+      ok: false,
+      erro: 'Faltou `municipio` — é a subpasta no FTP. Ex.: "HERVEIRAS".',
+    });
+  }
+
+  try {
+    const backup = iniciarBackup(pedido.banco, pedido.municipio, pedido.nome);
+    return res.status(202).json({ ok: true, ...backup });
+  } catch (e) {
+    const erro = e instanceof Error ? e.message : 'Nao consegui iniciar o backup';
+    console.error('[backup]', erro);
+    // 409 e "tem um rodando"; o resto e pedido que nao da para atender.
+    return res.status(backupEmAndamento() ? 409 : 400).json({ ok: false, erro });
+  }
+});
+
+app.get('/backup', autenticar, (_req: Request, res: Response) =>
+  res.json({ ok: true, backups: listarBackups(), emAndamento: backupEmAndamento() })
+);
+
+app.get('/backup/:id', autenticar, (req: Request, res: Response) => {
+  const backup = obterBackup(req.params.id);
+  if (!backup) return res.status(404).json({ ok: false, erro: 'Backup nao encontrado.' });
+  return res.json({ ok: true, ...backup });
 });
 
 app.use((_req, res) => res.status(404).json({ ok: false, erro: 'Rota inexistente' }));

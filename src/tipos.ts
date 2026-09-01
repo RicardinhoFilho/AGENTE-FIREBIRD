@@ -26,6 +26,14 @@ export interface Banco {
    * do JSON.
    */
   blobComoTexto?: boolean;
+  /**
+   * Credenciais proprias, quando o banco nao usa o SYSDBA da casa.
+   *
+   * Omitidos, valem `SYSDBA` + a senha deduzida da `versao` — o comportamento
+   * de sempre. Servem para bancos que moram numa VM com senha diferente.
+   */
+  usuario?: string;
+  senha?: string;
 }
 
 /**
@@ -98,4 +106,44 @@ export interface RespostaLote {
 export interface RespostaErro {
   ok: false;
   erro: string;
+}
+
+/**
+ * Backup: quem chama diz so QUAL banco. O destino (FTP) e do agente, nunca do
+ * pedido — ver a explicacao em `config.ts`.
+ */
+export interface PedidoBackup {
+  banco: Banco;
+  /**
+   * Vira a subpasta no FTP: `agente_firebird/<municipio>/`. Obrigatorio — sem
+   * ele os arquivos de todas as prefeituras cairiam no mesmo monte.
+   */
+  municipio: string;
+  /** Vira o comeco do nome do arquivo no FTP. Padrao: o nome do .GDB. */
+  nome?: string;
+}
+
+/**
+ * Em que pe esta o backup.
+ *
+ * `gerando` costuma ser a etapa longa: e o gbak lendo a base inteira.
+ */
+export type EstadoBackup = 'gerando' | 'compactando' | 'enviando' | 'pronto' | 'erro';
+
+export interface Backup {
+  id: string;
+  estado: EstadoBackup;
+  /** Nome do arquivo no FTP. So existe a partir de `enviando`. */
+  arquivo?: string;
+  /** Pasta no FTP, ja higienizada — pode diferir do que veio no pedido. */
+  municipio: string;
+  banco: string;
+  criadoEm: string;
+  terminadoEm?: string;
+  ms?: number;
+  bytesFbk?: number;
+  bytesZip?: number;
+  /** Ultima linha do gbak, ou os bytes ja enviados. Serve para saber que anda. */
+  progresso?: string;
+  erro?: string;
 }

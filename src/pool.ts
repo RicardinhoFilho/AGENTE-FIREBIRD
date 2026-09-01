@@ -24,8 +24,24 @@ export function senhaPorVersao(versao: string | number | undefined): string {
   return maior >= 3 ? config.senhaV3 : config.senhaV15;
 }
 
+/** `SYSDBA` + senha da versao, salvo quando o pedido trouxer credencial propria. */
+export function usuarioDe(banco: Banco): string {
+  return banco.usuario?.trim() || 'SYSDBA';
+}
+
+export function senhaDe(banco: Banco): string {
+  return banco.senha ?? senhaPorVersao(banco.versao);
+}
+
+/**
+ * O usuario entra na chave junto com o destino.
+ *
+ * Sem ele, dois sistemas pedindo o MESMO banco com credenciais diferentes
+ * receberiam o mesmo pool — o de quem chegou primeiro — e o segundo herdaria a
+ * permissao do primeiro sem nenhum sinal de que isso aconteceu.
+ */
 function chaveDo(banco: Banco): string {
-  return `${banco.host}:${banco.porta ?? 3050}:${banco.caminho}`;
+  return `${usuarioDe(banco)}@${banco.host}:${banco.porta ?? 3050}:${banco.caminho}`;
 }
 
 function opcoes(banco: Banco): Firebird.Options {
@@ -33,8 +49,8 @@ function opcoes(banco: Banco): Firebird.Options {
     host: banco.host,
     port: Number(banco.porta) || 3050,
     database: banco.caminho,
-    user: 'SYSDBA',
-    password: senhaPorVersao(banco.versao),
+    user: usuarioDe(banco),
+    password: senhaDe(banco),
     lowercase_keys: false,
     pageSize: 4096,
     // `charset` é o alfabeto em que o driver DECODIFICA strings do lado JS.
