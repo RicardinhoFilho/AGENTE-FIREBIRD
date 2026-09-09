@@ -128,7 +128,13 @@ export interface PedidoBackup {
  *
  * `gerando` costuma ser a etapa longa: e o gbak lendo a base inteira.
  */
-export type EstadoBackup = 'gerando' | 'compactando' | 'enviando' | 'pronto' | 'erro';
+export type EstadoBackup =
+  | 'gerando'
+  | 'verificando'
+  | 'compactando'
+  | 'enviando'
+  | 'pronto'
+  | 'erro';
 
 export interface Backup {
   id: string;
@@ -145,5 +151,34 @@ export interface Backup {
   bytesZip?: number;
   /** Ultima linha do gbak, ou os bytes ja enviados. Serve para saber que anda. */
   progresso?: string;
+  /**
+   * O backup foi conferido restaurando?
+   *
+   *   true  - restaurou: o arquivo presta
+   *   false - NAO restaurou: olhe o `verificacao` antes de confiar nele
+   *   null  - nao deu para conferir (desligado, sem motor, base grande demais)
+   *
+   * E um SELO, nao um portao: um backup reprovado sobe do mesmo jeito, porque
+   * uma incompatibilidade de metadados nao pode deixar a prefeitura sem backup.
+   */
+  verificado?: boolean | null;
+  /** O que aconteceu na conferencia, em uma linha. */
+  verificacao?: string;
+  /**
+   * SHA-256 do .zip, calculado ANTES do envio.
+   *
+   * E a ponte entre "verifiquei aqui" e "esta la no FTP": com ele, qualquer um
+   * confere depois se o arquivo no servidor e byte a byte o mesmo que passou
+   * pela verificacao. Sem isso, o laudo valeria so ate o upload comecar.
+   */
+  sha256?: string;
+  /**
+   * O tamanho no FTP bateu com o local logo apos o envio?
+   *
+   *   true  - o servidor confirmou o mesmo numero de bytes
+   *   false - chegou diferente (upload truncado)
+   *   null  - o servidor nao respondeu ao SIZE; nada a concluir
+   */
+  envioConferido?: boolean | null;
   erro?: string;
 }

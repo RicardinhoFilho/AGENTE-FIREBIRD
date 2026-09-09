@@ -28,6 +28,12 @@ echo === Servico AgenteFirebird ===
 "%NSSM%" set   AgenteFirebird Start SERVICE_AUTO_START
 "%NSSM%" set   AgenteFirebird AppStdout "%BASE%\agente.log"
 "%NSSM%" set   AgenteFirebird AppStderr "%BASE%\agente.log"
+REM Rotaciona o log: sem isto o agente.log cresce para sempre. Numa prefeitura
+REM com 20 bancos por noite ele passou de 190 mil linhas em semanas - e agora a
+REM verificacao escreve as linhas do gbak da restauracao tambem.
+"%NSSM%" set   AgenteFirebird AppRotateFiles 1
+"%NSSM%" set   AgenteFirebird AppRotateOnline 1
+"%NSSM%" set   AgenteFirebird AppRotateBytes 10485760
 "%NSSM%" start AgenteFirebird
 
 echo(

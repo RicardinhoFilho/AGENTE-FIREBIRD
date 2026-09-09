@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 import archiver from 'archiver';
@@ -7,11 +8,13 @@ import path from 'path';
 import { config } from './config';
 import { senhaDe, usuarioDe } from './pool';
 import type { Backup, Banco } from './tipos';
+import { verificarBackup } from './verificacao';
 
 /**
  * Backup da base para o FTP da Sinsoft.
  *
- * Tres etapas: `gbak` gera o .fbk, o .fbk vira .zip, o .zip sobe. Roda em
+ * Quatro etapas: `gbak` gera o .fbk, a restauracao confere se ele presta, o
+ * .fbk vira .zip e o .zip sobe. Roda em
  * segundo plano porque base de prefeitura tem varios GB — so o gbak ja passa de
  * meia hora, e nenhuma requisicao HTTP sobrevive a isso. Quem chama recebe um
  * `id` na hora e pergunta o estado depois.
@@ -112,7 +115,26 @@ function nomeDaBase(banco: Banco): string {
 }
 
 function carimbo(): string {
-  return new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
+  /**
+   * HORA LOCAL, nao UTC.
+   *
+   * `toISOString()` dava UTC, e no Brasil (UTC-3) todo backup rodado depois
+   * das 21h saia carimbado com o dia SEGUINTE. A checagem do dia certo
+   * acusava falta e o dia seguinte mostrava um backup que nao foi feito nele
+   * - os dois dias mentindo. Aconteceu em producao: o arquivo
+   * SIAFIC2025_20260909-000057.zip foi gerado as 21h00 do dia 08.
+   *
+   * O dia de um backup e um conceito da prefeitura, e quem escolhe a data na
+   * tela tambem pensa em horario local. Nada na cadeia depende de ser UTC: a
+   * checagem so le o que esta escrito no nome.
+   */
+  const d = new Date();
+  const dois = (n: number) => String(n).padStart(2, '0');
+
+  const dia = `${d.getFullYear()}${dois(d.getMonth() + 1)}${dois(d.getDate())}`;
+  const hora = `${dois(d.getHours())}${dois(d.getMinutes())}${dois(d.getSeconds())}`;
+
+  return `${dia}-${hora}`;
 }
 
 /**
@@ -254,7 +276,7 @@ async function enviarPorFtp(
   municipio: string,
   nomeRemoto: string,
   aoAndar: (bytes: number) => void
-): Promise<void> {
+): Promise<number | null> {
   const cliente = new ClienteFtp(60000);
   const provisorio = `${nomeRemoto}.parcial`;
   cliente.trackProgress(info => aoAndar(info.bytes));
@@ -269,6 +291,15 @@ async function enviarPorFtp(
     await cliente.ensureDir(`${config.ftp.pasta}/${municipio}`);
     await cliente.uploadFrom(local, provisorio);
     await cliente.rename(provisorio, nomeRemoto);
+
+    // Pergunta ao servidor quantos bytes ele guardou. E a confirmacao mais
+    // barata de que o arquivo chegou inteiro - e nem todo servidor FTP responde
+    // ao SIZE, entao a ausencia de resposta nao vira acusacao.
+    try {
+      return await cliente.size(nomeRemoto);
+    } catch {
+      return null;
+    }
   } catch (e) {
     // Melhor esforco: se a conexao ainda responder, nao deixa lixo para tras.
     // Se ela e que caiu, o .parcial fica — e o nome ja diz o que ele e.
@@ -281,6 +312,23 @@ async function enviarPorFtp(
   } finally {
     cliente.close();
   }
+}
+
+/**
+ * SHA-256 do arquivo, lido em fluxo.
+ *
+ * Em fluxo porque o zip passa de centenas de MB: ler tudo para a memoria numa
+ * maquina de prefeitura e pedir para o backup morrer por falta de RAM.
+ */
+function hashDoArquivo(caminho: string): Promise<string> {
+  return new Promise((resolver, rejeitar) => {
+    const hash = createHash('sha256');
+    const leitura = fs.createReadStream(caminho);
+
+    leitura.on('error', rejeitar);
+    leitura.on('data', pedaco => hash.update(pedaco));
+    leitura.on('end', () => resolver(hash.digest('hex')));
+  });
 }
 
 /** Apaga o temporario sem derrubar o backup se a remocao falhar. */
@@ -357,6 +405,23 @@ async function processar(registro: Backup, banco: Banco, base: string, gbak: str
     });
     registro.bytesFbk = fs.statSync(fbk).size;
 
+    // ── Confere restaurando ────────────────────────────────────────────────
+    // Nao interrompe o fluxo em nenhuma hipotese: o resultado e informacao
+    // colada no registro. Ver a explicacao em verificacao.ts.
+    registro.estado = 'verificando';
+    console.log(`[backup ${registro.id}] verificando: restaurando o .fbk num banco descartavel`);
+    const avisarVerif = aCadaTanto(5000);
+    const conferencia = await verificarBackup(fbk, banco, linha => {
+      registro.progresso = `verificando: ${linha}`;
+      avisarVerif(() => console.log(`[backup ${registro.id}] ${registro.progresso}`));
+    });
+    registro.verificado = conferencia.ok;
+    registro.verificacao = conferencia.detalhe;
+    console.log(
+      `[backup ${registro.id}] verificacao: ${conferencia.detalhe}` +
+        (conferencia.ms ? ` (${Math.round(conferencia.ms / 1000)}s)` : '')
+    );
+
     registro.estado = 'compactando';
     console.log(`[backup ${registro.id}] compactando ${registro.bytesFbk} bytes`);
     await compactar(fbk, zip, `${nomeArquivo}.fbk`);
@@ -364,20 +429,37 @@ async function processar(registro: Backup, banco: Banco, base: string, gbak: str
     // O .fbk ja cumpriu o papel; segurar os dois dobra o espaco ocupado.
     apagar(fbk);
 
+    // O hash sai ANTES do envio: e ele que liga o arquivo verificado ao
+    // arquivo que vai parar no FTP.
+    registro.sha256 = await hashDoArquivo(zip);
+    console.log(`[backup ${registro.id}] sha256 ${registro.sha256}`);
+
     registro.estado = 'enviando';
     registro.arquivo = `${nomeArquivo}.zip`;
     console.log(`[backup ${registro.id}] enviando ${registro.bytesZip} bytes para o FTP`);
     const avisarEnvio = aCadaTanto(5000);
-    await enviarPorFtp(zip, registro.municipio, registro.arquivo, bytes => {
+    const bytesRemotos = await enviarPorFtp(zip, registro.municipio, registro.arquivo, bytes => {
       const total = registro.bytesZip ?? 0;
       const pct = total ? Math.floor((bytes / total) * 100) : 0;
       registro.progresso = `enviado ${bytes} de ${total} bytes (${pct}%)`;
       avisarEnvio(() => console.log(`[backup ${registro.id}] ${registro.progresso}`));
     });
 
+    registro.envioConferido =
+      bytesRemotos == null ? null : bytesRemotos === registro.bytesZip;
+
+    if (registro.envioConferido === false) {
+      // Chegou diferente do que saiu: o arquivo esta la, mas truncado. Melhor
+      // gritar agora do que descobrir no dia da restauracao.
+      throw new Error(
+        `Upload incompleto: enviei ${registro.bytesZip} bytes e o FTP guardou ${bytesRemotos}.`
+      );
+    }
+
     registro.estado = 'pronto';
     console.log(
-      `[backup ${registro.id}] pronto: ${config.ftp.pasta}/${registro.municipio}/${registro.arquivo}`
+      `[backup ${registro.id}] pronto: ${config.ftp.pasta}/${registro.municipio}/${registro.arquivo}` +
+        (registro.envioConferido ? ' (tamanho conferido no servidor)' : '')
     );
   } catch (e) {
     registro.estado = 'erro';

@@ -72,9 +72,15 @@ export interface Resultado {
   ms: number;
 }
 
-// Tempo máximo para ADQUIRIR a conexão (handshake). Curto de propósito: um
-// Firebird remoto morto/inalcançável não pode pendurar a requisição por minutos.
-const TIMEOUT_CONEXAO = 20000;
+/**
+ * Tempo máximo para ADQUIRIR a conexão. Curto de propósito: um Firebird remoto
+ * morto/inalcançável não pode pendurar a requisição por minutos.
+ *
+ * Atenção: este relógio cobre DUAS coisas — o handshake **e** a espera na fila
+ * do pool. Num lote paralelo maior que `TAMANHO_POOL`, as consultas excedentes
+ * ficam na fila e estouram aqui mesmo com o banco perfeitamente saudável.
+ */
+const TIMEOUT_CONEXAO = config.timeoutConexaoMs;
 
 interface ErroConexao extends Error { __faseConexao?: boolean; }
 
@@ -123,7 +129,10 @@ function executarUmaVez(
     // 1) Timeout da AQUISIÇÃO da conexão. Se o handshake pendurar (conexão morta),
     //    o request não fica preso: expira, marca fase de conexão e o wrapper retenta.
     let timer = setTimeout(() => {
-      const e: ErroConexao = new Error('Tempo limite ao abrir conexão com o Firebird (handshake).');
+      const e: ErroConexao = new Error(
+        `Tempo limite ao obter conexão com o Firebird (handshake ou fila do pool de ` +
+          `${config.tamanhoPool}).`
+      );
       e.__faseConexao = true;
       encerrar(e);
     }, TIMEOUT_CONEXAO);
@@ -299,6 +308,24 @@ function traduzir(erro: Error, banco: Banco): Error {
     return new Error(
       `Não achei o banco em ${banco.caminho}. Esse caminho é o do servidor da ` +
         'prefeitura, visto pelo próprio Firebird — não o do computador que chamou.'
+    );
+  }
+  /**
+   * Nao deu para OBTER conexao a tempo — e as duas causas pedem acoes opostas,
+   * entao a mensagem precisa citar as duas.
+   *
+   * Em Sao Jose, dois sistemas usavam o MESMO banco e so um falhava: nao era o
+   * servidor, era a fila do pool. A mensagem antiga so falava em handshake e
+   * mandou a investigacao para o lado errado (porta, rede, versao).
+   */
+  if (/handshake|obter conexão/i.test(msg)) {
+    return new Error(
+      `Tempo limite (${config.timeoutConexaoMs}ms) ao obter conexão com o Firebird em ` +
+        `${banco.host}:${banco.porta ?? 3050} (${banco.caminho}). ` +
+        `Duas causas possíveis: (1) o servidor aceitou o TCP mas não respondeu o ` +
+        `handshake — confira porta e serviço; (2) as ${config.tamanhoPool} conexões do ` +
+        `pool estão ocupadas e esta ficou na fila — se um lote grande dispara mais ` +
+        `consultas em paralelo que isso, aumente TAMANHO_POOL no .env.`
     );
   }
   if (/ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENOTFOUND/i.test(msg)) {

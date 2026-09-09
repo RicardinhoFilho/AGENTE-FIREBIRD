@@ -1,3 +1,6 @@
+// PRIMEIRO import de proposito: ele carimba a hora local em todo console.log,
+// inclusive nas mensagens de subida dos modulos importados abaixo.
+import './log';
 import express, { Request, Response } from 'express';
 import {
   backupEmAndamento,

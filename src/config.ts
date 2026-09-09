@@ -103,6 +103,23 @@ function booleano(nome: string, padrao: boolean): boolean {
   return valor.toLowerCase() === 'true' || valor === '1';
 }
 
+/**
+ * Quem pode chamar o agente.
+ *
+ * `IPS_PERMITIDOS=*` desliga o filtro por completo — inclusive os IPS_FIXOS
+ * compilados, que de outro modo entrariam sempre e manteriam a lista nao vazia.
+ * Serve para as instalacoes onde o filtro ja nao filtra nada: onde a borda faz
+ * SNAT, TODA chamada chega com o mesmo endereco, entao listar IP e teatro.
+ *
+ * Desligado, o que segura o acesso e so a chave. Prefira travar no firewall da
+ * prefeitura, que e a unica camada que ainda enxerga a origem verdadeira.
+ */
+function listaDeIps(): string[] {
+  const doEnv = lista('IPS_PERMITIDOS');
+  if (doEnv.includes('*')) return [];
+  return [...new Set([...IPS_FIXOS, ...doEnv])];
+}
+
 function lista(nome: string): string[] {
   return (process.env[nome] ?? '')
     .split(',')
@@ -122,7 +139,7 @@ export const config = {
   chave: (process.env.AGENTE_CHAVE || CHAVE_FIXA).trim(),
 
   /** Se preenchido, só estes IPs podem chamar. Vazio = qualquer um com a chave. */
-  ipsPermitidos: [...new Set([...IPS_FIXOS, ...lista('IPS_PERMITIDOS')])],
+  ipsPermitidos: listaDeIps(),
 
   /**
    * Deixa passar comando que **escreve**.
@@ -150,6 +167,16 @@ export const config = {
 
   /** Quantas conexões por banco. */
   tamanhoPool: Number(process.env.TAMANHO_POOL ?? 5),
+
+  /**
+   * Teto para OBTER uma conexao do pool (handshake + espera na fila).
+   *
+   * Curto de proposito, para que um Firebird morto nao pendure a requisicao por
+   * minutos. Mas um lote grande num banco lento faz as consultas excedentes
+   * esperarem na fila e estourarem aqui — nesse caso o remedio e aumentar o
+   * TAMANHO_POOL, nao este numero.
+   */
+  timeoutConexaoMs: Number(process.env.TIMEOUT_CONEXAO_MS ?? 20000),
 
   /**
    * Senha do SYSDBA por versão do Firebird — a mesma regra dos outros sistemas
@@ -194,6 +221,35 @@ export const config = {
 
   /** Teto de um backup inteiro (gbak + zip + upload). Base grande demora. */
   backupTimeoutMs: Number(process.env.BACKUP_TIMEOUT_MS ?? 7200000),
+
+  /**
+   * Conferir o backup restaurando-o num banco descartavel.
+   *
+   * "gbak terminou sem erro" nao prova que o .fbk restaura. Restaurar prova - e
+   * e a unica coisa que prova. Custa o dobro do tempo e ~3x o espaco em disco,
+   * entao vem com teto e pode ser desligado numa prefeitura apertada.
+   */
+  verificarBackup: booleano('VERIFICAR_BACKUP', true),
+
+  /** Acima disto o backup nao e conferido, para nao encher o disco da prefeitura. */
+  verificarMaxGb: Number(process.env.VERIFICAR_MAX_GB ?? 5),
+
+  /** Teto de tempo da conferencia. Restaurar 400 MB levou ~3 min nos testes. */
+  verificarTimeoutMs: Number(process.env.VERIFICAR_TIMEOUT_MS ?? 3600000),
+
+  /**
+   * Servidor Firebird 1.5 usado para conferir backups de base 1.5.
+   *
+   * A maquina do agente quase sempre TEM Firebird 1.5 instalado (e nao tem o
+   * 3.0). Usar o servidor que ja esta ali confere o backup com a versao exata
+   * dele - que e o caminho real de restauracao numa prefeitura -, em vez de
+   * restaurar no 3.0 com correcao de metadados.
+   *
+   * Sem esse servidor a conferencia das bases 1.5 e pulada com motivo, nunca
+   * tratada como backup reprovado.
+   */
+  verificar15Host: process.env.VERIFICAR_15_HOST ?? 'localhost',
+  verificar15Porta: Number(process.env.VERIFICAR_15_PORTA ?? 3050),
 };
 
 /** O que impede o agente de subir. */
@@ -233,8 +289,9 @@ export function avisos(): string[] {
   }
   if (config.ipsPermitidos.length === 0) {
     lista.push(
-      'IPS_PERMITIDOS vazio — qualquer origem com a chave pode consultar. ' +
-        'Numa instalação exposta, liste os IPs dos servidores da Sinsoft.'
+      'FILTRO DE IP DESLIGADO — qualquer origem com a chave pode consultar e ' +
+        'executar backup. A chave e a unica protecao. Trave a porta no firewall ' +
+        'da prefeitura, que ainda enxerga o IP de origem verdadeiro.'
     );
   }
   return lista;
