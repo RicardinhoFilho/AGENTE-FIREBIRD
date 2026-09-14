@@ -57,7 +57,7 @@ const PERMITIR_BACKUP_PADRAO = true;    // rota /backup (gbak + zip + FTP). fals
  * conta de FTP so de escrita, sem permissao de listar nem baixar. <<<
  */
 const FTP_PADRAO = {
-  host: 'www.sinsoft.com.br',
+  host: 'bkp.sinsoft.com.br',
   usuario: 'ftpsinsoft',
   senha: 'OZ3msYLsLZiuI',
   pasta: 'agente_firebird',
