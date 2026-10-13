@@ -1,7 +1,10 @@
 // PRIMEIRO import de proposito: ele carimba a hora local em todo console.log,
 // inclusive nas mensagens de subida dos modulos importados abaixo.
 import './log';
+import fs from 'fs';
+import path from 'path';
 import express, { Request, Response } from 'express';
+import { abrirArquivo, ErroArquivo, tipoPorExtensao } from './arquivos';
 import {
   backupEmAndamento,
   iniciarBackup,
@@ -221,6 +224,55 @@ app.get('/backup/:id', autenticar, (req: Request, res: Response) => {
   if (!backup) return res.status(404).json({ ok: false, erro: 'Backup nao encontrado.' });
   return res.json({ ok: true, ...backup });
 });
+
+/**
+ * Baixa um arquivo do servidor da prefeitura.
+ *
+ *   GET /arquivo?caminho=D:\anexos\processo-123.pdf
+ *
+ * Responde o arquivo CRU, nao JSON: um PDF de 10 MB em base64 dentro de um
+ * JSON viraria 13 MB de texto no link da prefeitura, que costuma ter upload
+ * magro. Quem chama le o corpo como binario.
+ *
+ * So le de dentro de ARQUIVOS_PASTAS — ver o porque em `arquivos.ts`.
+ */
+app.get('/arquivo', autenticar, (req: Request, res: Response) => {
+  const pedido = String(req.query.caminho ?? '');
+
+  try {
+    const { caminho, bytes } = abrirArquivo(pedido);
+
+    res.setHeader('Content-Type', tipoPorExtensao(caminho));
+    res.setHeader('Content-Length', bytes);
+    // `filename*` leva o nome com acento intacto; o `filename` simples fica de
+    // reserva para cliente antigo que nao entende RFC 5987.
+    const nome = path.basename(caminho);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${nome.replace(/[^\x20-\x7E]/g, '_')}"; ` +
+        `filename*=UTF-8''${encodeURIComponent(nome)}`
+    );
+
+    const fluxo = fs.createReadStream(caminho);
+    // Erro no meio da leitura: a resposta ja comecou, entao nao da para trocar
+    // o status — resta cortar a conexao para quem chama perceber que veio
+    // incompleto, em vez de gravar um arquivo truncado achando que deu certo.
+    fluxo.on('error', (e: Error) => {
+      console.error(`[arquivo] falha lendo ${caminho}: ${e.message}`);
+      res.destroy();
+    });
+    console.log(`[arquivo] ${bytes} bytes: ${caminho}`);
+    return fluxo.pipe(res);
+  } catch (e) {
+    const status = e instanceof ErroArquivo ? e.status : 500;
+    const erro = e instanceof Error ? e.message : 'Falha ao ler o arquivo';
+    if (status >= 500) console.error('[arquivo]', erro);
+    return res.status(status).json({ ok: false, erro });
+  }
+});
+
+// Nao ha rota de listagem/pesquisa de proposito: quem chama ja sabe o caminho
+// exato do anexo (vem do banco que esta sendo migrado). So o download direto.
 
 app.use((_req, res) => res.status(404).json({ ok: false, erro: 'Rota inexistente' }));
 

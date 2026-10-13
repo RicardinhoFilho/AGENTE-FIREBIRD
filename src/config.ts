@@ -120,9 +120,14 @@ function listaDeIps(): string[] {
   return [...new Set([...IPS_FIXOS, ...doEnv])];
 }
 
-function lista(nome: string): string[] {
+/**
+ * Lista separada por virgula — ou por outro separador, quando a virgula nao
+ * serve. Caminho do Windows pode ter virgula no nome da pasta, mas nunca `;`,
+ * entao as pastas usam ponto-e-virgula (a mesma convencao do PATH).
+ */
+function lista(nome: string, separador = ','): string[] {
   return (process.env[nome] ?? '')
-    .split(',')
+    .split(separador)
     .map(v => v.trim())
     .filter(Boolean);
 }
@@ -233,6 +238,26 @@ export const config = {
 
   /** Acima disto o backup nao e conferido, para nao encher o disco da prefeitura. */
   verificarMaxGb: Number(process.env.VERIFICAR_MAX_GB ?? 5),
+
+  /**
+   * Pastas de onde a rota /arquivo pode ler.
+   *
+   * Vem compilada com `C:\rede\sinsoft`, onde ficam os anexos dos sistemas da
+   * casa (unico\Licitacon\Documentos etc.), para TODA prefeitura funcionar sem
+   * configurar nada. Dentro dessa arvore o agente le; fora dela, recusa — junto
+   * com a trava de extensao, so entrega documento, nunca `.env`/`.GDB`/`.exe`.
+   *
+   * O .env ainda SOMA, para uma instalacao que guarde anexo noutro lugar:
+   *   ARQUIVOS_PASTAS=D:\outros;E:\protocolo
+   */
+  arquivosPastas: [...new Set(['C:\\rede\\sinsoft', ...lista('ARQUIVOS_PASTAS', ';')])],
+
+  /**
+   * Teto por arquivo, em MB. 0 (o padrao) = SEM teto: vem o que estiver na prefeitura.
+   * O arquivo sai em fluxo (createReadStream), entao o tamanho nao pesa na memoria do
+   * agente. Quem quiser poupar o link da prefeitura limita no .env.
+   */
+  arquivosMaxMb: Number(process.env.ARQUIVOS_MAX_MB ?? 0),
 
   /** Teto de tempo da conferencia. Restaurar 400 MB levou ~3 min nos testes. */
   verificarTimeoutMs: Number(process.env.VERIFICAR_TIMEOUT_MS ?? 3600000),
