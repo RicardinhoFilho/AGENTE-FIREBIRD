@@ -1,0 +1,111 @@
+================================================================
+ AGENTE FIREBIRD - SINSOFT
+ Pacote de instalacao para prefeituras e camaras
+================================================================
+
+O QUE TEM AQUI
+--------------
+  agente-firebird.exe        o agente
+  INSTALAR-SERVICOS.bat      instala (ou atualiza) os servicos
+  DESINSTALAR-SERVICOS.bat   remove os servicos
+  firebird\3.0  e  firebird\1.5   cliente gbak, usado pela rota de backup
+  nginx\                     recebe da internet e repassa ao agente
+  nssm\                      transforma o agente em servico do Windows
+
+
+COMO INSTALAR
+-------------
+1. Copie ESTA PASTA INTEIRA para a maquina, por exemplo C:\MIGRACAO.
+
+   >>> NAO copie para dentro de C:\Sinsoft <<<
+   O instalador copia DESTA pasta PARA C:\Sinsoft. Se as duas forem a
+   mesma, ele tenta copiar o arquivo sobre ele mesmo, falha, e nada e
+   atualizado - sem avisar direito.
+
+2. Clique com o botao direito no INSTALAR-SERVICOS.bat e escolha
+   "Executar como administrador".
+
+3. No fim ele mostra o estado dos dois servicos e a data do exe
+   instalado. A data tem que ser a de hoje: e a prova de que o
+   binario trocou mesmo.
+
+
+COMO CONFERIR QUE SUBIU
+-----------------------
+No PowerShell (como administrador):
+
+  Get-Content C:\Sinsoft\agente.log -Tail 10
+
+Tem que aparecer, com a hora de agora:
+
+  [dd/mm hh:mm:ss] Agente Firebird da Sinsoft em http://localhost:3060
+  [dd/mm hh:mm:ss] Configuracao lida de: C:\Sinsoft\.env
+  [dd/mm hh:mm:ss] Modo: ...
+
+Se parar na PRIMEIRA linha, o exe e antigo - versoes anteriores
+morriam ali em Windows Server 2012 R2.
+
+ATENCAO: no PowerShell, "sc" e apelido de Set-Content, nao do
+programa de servicos. Use "sc.exe query AgenteFirebird" ou
+"Get-Service AgenteFirebird".
+
+
+PORTAS
+------
+  nginx   escuta a porta que vem da internet   (padrao 1000)
+  agente  escuta 3060, so localmente
+
+Para mudar a porta de fora, edite o "listen" em
+C:\Sinsoft\nginx\conf\nginx.conf, libere no firewall e rode:
+
+  C:\Sinsoft\nssm\win64\nssm.exe restart nginx
+
+
+AJUSTES POR PREFEITURA - C:\Sinsoft\.env
+----------------------------------------
+O arquivo e opcional: sem ele valem os padroes compilados no exe.
+Crie/edite so o que precisar mudar. Uma opcao por linha:
+
+  IPS_PERMITIDOS=*            libera qualquer origem (use onde a
+                              borda faz NAT e todo mundo chega com
+                              o mesmo IP; a chave passa a ser a
+                              unica protecao)
+  IPS_PERMITIDOS=1.2.3.4      ou liste IPs separados por virgula
+  TAMANHO_POOL=20             mais conexoes simultaneas por banco
+  BACKUP_PASTA=D:\backup-tmp  onde o .fbk nasce (cuidado com espaco
+                              em disco: ele pode ter o tamanho do banco)
+  PERMITIR_BACKUP=false       desliga a rota de backup
+
+Depois de mexer no .env:
+
+  net stop AgenteFirebird
+  net start AgenteFirebird
+
+
+PARA DESINSTALAR
+----------------
+Botao direito no DESINSTALAR-SERVICOS.bat > Executar como
+administrador. Ele para e remove os dois servicos, e no fim
+PERGUNTA se apaga a pasta C:\Sinsoft.
+
+Responda vazio (Enter) se for so trocar de versao: o C:\Sinsoft
+guarda o .env desta prefeitura e o agente.log.
+
+
+ANEXOS - BAIXAR ARQUIVOS DO SERVIDOR (migracao)
+-----------------------------------------------
+Por padrao esta DESLIGADO. Para ligar, liste no C:\Sinsoft\.env as
+pastas de onde o agente pode ler (ponto-e-virgula entre elas):
+
+  ARQUIVOS_PASTAS=D:\anexos;E:\protocolo\docs
+  ARQUIVOS_MAX_MB=100
+
+Sem essa linha as rotas respondem 403. E de proposito: o caminho vem
+no pedido, entao sem a lista o agente entregaria QUALQUER arquivo da
+maquina - o .env, os .GDB, arquivos do Windows.
+
+Use:
+  GET /arquivos?pasta=D:\anexos&recursivo=1   lista (JSON)
+  GET /arquivo?caminho=D:\anexos\doc.pdf      baixa o arquivo (binario)
+
+As duas exigem o cabecalho Authorization: Bearer <chave>.
